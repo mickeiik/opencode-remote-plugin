@@ -1,5 +1,6 @@
 /**
  * Copyright Daytona Platforms Inc.
+ * Copyright 2026 mickeiik (modifications)
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,19 +9,20 @@ import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
 import type { DaytonaSessionManager } from '../core/session-manager'
 
-export const getPreviewURLTool = (
+export const readTool = (
   sessionManager: DaytonaSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Gets a preview URL for the Daytona sandbox',
+  description: 'Reads file from Daytona sandbox',
   args: {
-    port: z.number().int().min(1).max(65535),
+    filePath: z.string(),
   },
-  async execute(args: { port: number }, ctx: ToolContext) {
+  async execute(args: { filePath: string }, ctx: ToolContext) {
     const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const previewLink = await sandbox.getPreviewLink(args.port)
-    return `Sandbox Preview URL: ${previewLink.url}`
+    const buffer = await sandbox.fs.downloadFile(args.filePath)
+    const decoder = new TextDecoder()
+    return decoder.decode(buffer)
   },
 })
