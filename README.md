@@ -277,6 +277,6 @@ opencode-remote-plugin/
 
 ## Credits & License
 
-Forked from [`packages/opencode-plugin`](https://github.com/daytona/integrations/tree/main/packages/opencode-plugin) in the Daytona integrations monorepo.
+Based on [`@daytona/opencode`](https://github.com/daytona/integrations/tree/main/packages/opencode-plugin) by Daytona Platforms Inc., licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). The original copyright and attribution notices are retained in [`LICENSE`](LICENSE).
 
-Apache-2.0 — inherited from the upstream project.
+Modifications © 2026 mickeiik, released under the same Apache-2.0 license.

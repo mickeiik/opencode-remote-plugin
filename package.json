@@ -1,7 +1,7 @@
 {
-  "name": "@daytona/opencode",
-  "version": "0.192.0",
-  "description": "OpenCode plugin that automatically runs all sessions in Daytona sandboxes for isolated, reproducible development environments",
+  "name": "opencode-remote-plugin",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that runs all sessions on a remote machine over SSH, with automatic git sync back to local branches",
   "main": "./.opencode/plugin/index.js",
   "types": "./.opencode/plugin/index.d.ts",
   "files": [
@@ -9,19 +9,19 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/daytona/integrations.git",
-    "directory": "packages/opencode-plugin"
+    "url": "git+https://github.com/mickeiik/opencode-remote-plugin.git"
   },
-  "author": "Daytona Platforms Inc.",
+  "author": "mickeiik <dkenan.mickael@gmail.com>",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/daytona/integrations/issues"
+    "url": "https://github.com/mickeiik/opencode-remote-plugin/issues"
   },
-  "homepage": "https://github.com/daytona/integrations/tree/main/packages/opencode-plugin#readme",
+  "homepage": "https://github.com/mickeiik/opencode-remote-plugin#readme",
   "keywords": [
-    "daytona",
     "opencode",
-    "plugin"
+    "plugin",
+    "ssh",
+    "remote"
   ],
   "scripts": {
     "build": "tsc",
