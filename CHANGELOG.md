@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This project forked fro
 
 Initial fork release, based on `@daytona/opencode` 0.192.0.
 
+### Added
+
+- `REMOTE_*` configuration resolution (`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_USER`, `REMOTE_PROJECT_PATH`, `REMOTE_SSH_KNOWN_HOSTS`) with `.env` support in the project root; process env takes precedence (issues #1, #2)
+
 ### Changed
 
 - Repositioned as `opencode-remote-plugin`: runs OpenCode sessions on any SSH-reachable machine instead of Daytona sandboxes (documentation updated)
