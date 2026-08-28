@@ -11,7 +11,6 @@
     "type": "git",
     "url": "git+https://github.com/mickeiik/opencode-remote-plugin.git"
   },
-  "author": "mickeiik <dkenan.mickael@gmail.com>",
   "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/mickeiik/opencode-remote-plugin/issues"
@@ -29,7 +28,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.1.59",
+    "@opencode-ai/plugin": "1.18.23",
     "xdg-basedir": "^5.1.0",
     "zod": "^4.2.1"
   },
