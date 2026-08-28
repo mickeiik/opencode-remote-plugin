@@ -18,7 +18,11 @@ No Daytona account, API key, or SDK is involved anymore: if you can `ssh user@ho
 **Local machine**
 
 - OpenCode
+- Linux or macOS — Windows is not supported (see note below)
 - Your project must be a git repository (`git init`)
+
+> [!NOTE]
+> **Windows hosts are not supported.** The plugin runs commands through the system `ssh` binary and keeps a single multiplexed SSH connection open between commands (`ControlMaster`/`ControlPath`), so it doesn't pay a fresh TCP connection + authentication handshake for every command it runs. OpenSSH's Windows port does not implement connection multiplexing and rejects these options, which makes every plugin SSH call fail on Windows. Workaround: run OpenCode (and this plugin) inside [WSL](https://learn.microsoft.com/en-us/windows/wsl/about), which provides the full Linux OpenSSH. The remote machine itself can be anything with an SSH server.
 
 **Remote machine**
 

@@ -9,6 +9,7 @@ Initial fork release, based on `@daytona/opencode` 0.192.0.
 ### Added
 
 - `REMOTE_*` configuration resolution (`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_USER`, `REMOTE_PROJECT_PATH`, `REMOTE_SSH_KNOWN_HOSTS`) with `.env` support in the project root; process env takes precedence (issues #1, #2)
+- SSH transport core (`core/ssh.ts`): `SshExecutor` runs commands over the system `ssh` binary (honoring `~/.ssh/config`, keys, agents, jump hosts) with ControlMaster connection reuse and keepalive probes that drop dead connections within ~45s; when `REMOTE_SSH_KNOWN_HOSTS` is set, command execution pins host-key verification to that file (same semantics as git transfers). Also exports `shellQuote` and `sshCommonArgs` helpers (issue #3)
 
 ### Changed
 
