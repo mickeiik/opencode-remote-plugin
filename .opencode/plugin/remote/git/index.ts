@@ -4,4 +4,5 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export { RemoteGitManager } from './remote-git-manager'
 export { SessionGitManager } from './session-git-manager'

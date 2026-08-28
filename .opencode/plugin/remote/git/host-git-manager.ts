@@ -5,6 +5,7 @@
  */
 
 import { logger } from '../core/logger'
+import { shellQuote, sshCommonArgs } from '../core/ssh'
 import { spawnSync } from 'child_process'
 import { realpathSync } from 'fs'
 import { isAbsolute, resolve as pathResolve } from 'path'
@@ -36,34 +37,48 @@ function execGit(args: string[], options: ExecOptions = {}): ExecResult {
   return { ok: status === 0, stdout: res.stdout ?? '', stderr: res.stderr ?? '', status }
 }
 
-// POSIX sh single-quoting (close, escape, reopen): GIT_SSH_COMMAND is parsed by the
-// shell, so an unquoted known_hosts path containing spaces would split into ssh args.
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-// When DAYTONA_SSH_KNOWN_HOSTS names a known_hosts file with the ssh.app.daytona.io
-// host keys, pin host verification to it for sandbox git transfers. This lets the
-// first noninteractive sync succeed without trust-on-first-use, and without changing
-// SSH behavior for any other remote. Unset means inherited SSH behavior, as before.
+// Always sets GIT_SSH_COMMAND so host-side git transfers (push/fetch to the remote
+// machine) go through ssh with the same BatchMode, connection reuse (ControlMaster)
+// and keepalive behavior as SshExecutor command execution. When REMOTE_SSH_KNOWN_HOSTS
+// names a known_hosts file, host verification for the transfer is additionally pinned
+// to it: this lets the first noninteractive sync succeed without trust-on-first-use,
+// and without changing SSH behavior for any other remote. Unset means inherited
+// host-key behavior for the transfer itself.
 //
 // The value crosses two parsers. sh splits GIT_SSH_COMMAND into ssh's argv (outer
-// single quotes), then OpenSSH splits the UserKnownHostsFile VALUE on whitespace as
-// a file list (inner double quotes keep a spaced path as one file). OpenSSH's config
-// grammar has no escape for a literal double quote inside a quoted value, so such
-// paths are rejected instead of being silently mis-pinned.
-function networkEnv(): NodeJS.ProcessEnv | undefined {
-  const knownHosts = process.env.DAYTONA_SSH_KNOWN_HOSTS?.trim()
-  if (!knownHosts) return undefined
-  if (knownHosts.includes('"')) {
-    throw new Error('DAYTONA_SSH_KNOWN_HOSTS must not contain a double quote (") character')
+// single quotes, applied per argument below), then OpenSSH splits the
+// UserKnownHostsFile VALUE on whitespace as a file list (inner double quotes keep a
+// spaced path as one file). OpenSSH's config grammar has no escape for a literal
+// double quote inside a quoted value, so such paths are rejected instead of being
+// silently mis-pinned.
+//
+// Reads process.env directly rather than the .env-resolved RemoteConfig, which this
+// class does not receive — a value set only in .env therefore pins SshExecutor
+// commands but not git transfers. Revisit when config is wired through the callers.
+function networkEnv(): NodeJS.ProcessEnv {
+  const knownHosts = process.env.REMOTE_SSH_KNOWN_HOSTS?.trim()
+  if (knownHosts?.includes('"')) {
+    throw new Error('REMOTE_SSH_KNOWN_HOSTS must not contain a double quote (") character')
+  }
+  // Each ssh argument is single-quoted: sh re-splits GIT_SSH_COMMAND, and values like
+  // the ControlPath socket template must survive that split as single arguments.
+  const sshCommand = ['ssh', ...sshCommonArgs().map(shellQuote)]
+  if (knownHosts) {
+    sshCommand.push(
+      '-o',
+      shellQuote(`UserKnownHostsFile="${knownHosts}"`),
+      '-o',
+      'GlobalKnownHostsFile=/dev/null',
+      '-o',
+      'StrictHostKeyChecking=yes',
+    )
   }
   return {
     ...process.env,
     // GlobalKnownHostsFile=/dev/null: otherwise a matching entry in the system-wide
     // /etc/ssh/ssh_known_hosts would also be accepted and verification would not be
     // pinned to the configured file alone.
-    GIT_SSH_COMMAND: `ssh -o ${shellQuote(`UserKnownHostsFile="${knownHosts}"`)} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes`,
+    GIT_SSH_COMMAND: sshCommand.join(' '),
   }
 }
 
@@ -235,7 +250,7 @@ export class HostGitManager {
 
     // Provide a default identity for reservation commits when repo has no user.name/user.email (e.g. CI).
     const reservationCommitName = 'OpenCode Plugin'
-    const reservationCommitEmail = 'opencode@daytona.io'
+    const reservationCommitEmail = 'opencode-remote@localhost'
     const reservationCommitMessage = 'OpenCode reservation'
     const commitEnv = {
       ...process.env,
@@ -301,6 +316,17 @@ export class HostGitManager {
     if (!addRes.ok) {
       throw new Error(`Failed to configure sandbox remote '${remoteName}': ${addRes.stderr}`)
     }
+  }
+
+  /**
+   * Best-effort removal of a configured remote (e.g. after session delete). Serialized
+   * through the repo's queue so it cannot race `remote add/remove` in `setRemote`;
+   * failures are ignored — the remote may not exist or the repo may already be gone.
+   */
+  removeRemote(remoteName: string, cwd: string): void {
+    void HostGitManager.enqueue(cwd, async () => {
+      execGit(['remote', 'remove', remoteName], { cwd })
+    })
   }
 
   async pull(remoteName: string, sshUrl: string, branch: string, cwd: string, localBranch?: string): Promise<void> {
