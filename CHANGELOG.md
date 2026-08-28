@@ -13,5 +13,6 @@ Initial fork release, based on `@daytona/opencode` 0.192.0.
 
 ### Changed
 
+- Session storage schema tracks the remote workspace instead of a sandbox: `SessionInfo.sandboxId` renamed to `workspacePath`, `SandboxInfo`/`SessionSandboxMap` and the `@daytona/sdk` import removed from `core/types.ts`, new `RemoteSession` in-memory session handle type, and `getBranchNumberForSandbox` renamed to `getBranchNumberForWorkspace` in `core/project-data-storage.ts` (issue #4). The plugin does not compile until dependent modules are migrated (issues #5–#8)
 - Repositioned as `opencode-remote-plugin`: runs OpenCode sessions on any SSH-reachable machine instead of Daytona sandboxes (documentation updated)
 - Package renamed from `@daytona/opencode` to `opencode-remote-plugin`; metadata points to this repository

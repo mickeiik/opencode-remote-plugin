@@ -5,10 +5,8 @@
  */
 
 /**
- * Type definitions and constants for the Daytona OpenCode plugin
+ * Type definitions and constants for the remote OpenCode plugin
  */
-
-import type { Sandbox } from '@daytona/sdk'
 
 // OpenCode Types
 
@@ -40,16 +38,12 @@ export type ExperimentalChatSystemTransformOutput = {
 export const EVENT_TYPE_SESSION_DELETED = 'session.deleted'
 export const EVENT_TYPE_SESSION_IDLE = 'session.idle'
 
-// Daytona plugin types
+// Remote plugin types
 
 export type LogLevel = 'INFO' | 'ERROR' | 'WARN'
 
-export type SandboxInfo = {
-  id: string
-}
-
 export type SessionInfo = {
-  sandboxId: string
+  workspacePath: string
   /**
    * Only set when the local worktree is a git repo (used to create opencode/N branches/remotes).
    */
@@ -64,9 +58,18 @@ export type ProjectSessionData = {
   sessions: Record<string, SessionInfo>
 }
 
-export type SessionSandboxMap = Map<string, Sandbox | SandboxInfo>
+/**
+ * In-memory per-session handle tools receive (replaces the remote workspace object).
+ * `id` is the workspace key (e.g. the session number as a string).
+ */
+export type RemoteSession = {
+  id: string
+  workspacePath: string
+  bareRepoPath: string
+  branchNumber?: number
+}
 
-// Daytona plugin constants
+// Remote plugin constants
 
 export const LOG_LEVEL_INFO: LogLevel = 'INFO'
 export const LOG_LEVEL_ERROR: LogLevel = 'ERROR'

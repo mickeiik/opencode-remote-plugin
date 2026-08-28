@@ -6,7 +6,7 @@
 
 /**
  * Handles file storage operations for project session data
- * Stores data per-project in ~/.local/share/opencode/storage/daytona/{projectId}.json
+ * Stores data per-project in ~/.local/share/opencode/storage/remote/{projectId}.json
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'fs'
@@ -169,14 +169,14 @@ export class ProjectDataStorage {
   }
 
   /**
-   * Get branch number for a sandbox
+   * Get branch number for a workspace
    */
-  getBranchNumberForSandbox(projectId: string, sandboxId: string): number | undefined {
+  getBranchNumberForWorkspace(projectId: string, workspacePath: string): number | undefined {
     const projectData = this.load(projectId)
     if (!projectData) {
       return undefined
     }
-    const session = Object.values(projectData.sessions).find((s) => s.sandboxId === sandboxId)
+    const session = Object.values(projectData.sessions).find((s) => s.workspacePath === workspacePath)
     return session?.branchNumber
   }
 
@@ -187,7 +187,7 @@ export class ProjectDataStorage {
     projectId: string,
     worktree: string,
     sessionId: string,
-    sandboxId: string,
+    workspacePath: string,
     branchNumber?: number,
   ): void {
     const projectData = this.load(projectId) || {
@@ -199,13 +199,13 @@ export class ProjectDataStorage {
     const now = Date.now()
     if (!projectData.sessions[sessionId]) {
       projectData.sessions[sessionId] = {
-        sandboxId,
+        workspacePath,
         ...(branchNumber !== undefined ? { branchNumber } : {}),
         created: now,
         lastAccessed: now,
       }
     } else {
-      projectData.sessions[sessionId].sandboxId = sandboxId
+      projectData.sessions[sessionId].workspacePath = workspacePath
       projectData.sessions[sessionId].lastAccessed = now
       // Only update branch number if it wasn't set before
       if (projectData.sessions[sessionId].branchNumber === undefined) {
