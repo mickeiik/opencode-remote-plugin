@@ -270,7 +270,7 @@ npm run typecheck
 ```
 opencode-remote-plugin/
 ├── .opencode/plugin/             # Plugin source (TypeScript)
-│   ├── remote/                   # Main integration (being renamed from daytona/)
+│   ├── remote/                   # Main integration
 │   └── index.ts                  # Plugin entry point (compiled to .js in place)
 ├── .gitignore
 ├── .npmignore

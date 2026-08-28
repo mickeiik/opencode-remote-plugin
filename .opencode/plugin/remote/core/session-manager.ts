@@ -41,7 +41,7 @@ export class RemoteSessionManager {
 
   /**
    * Resolve the remote config for `worktree` and build the SSH executor, caching the
-   * pair. A missing configuration fails hard, mirroring the old DAYTONA_API_KEY check.
+   * pair. A missing configuration fails hard instead of surfacing later as cryptic SSH failures.
    */
   private getExecutorPair(worktree: string): { config: RemoteConfig; ssh: SshExecutor } {
     if (!this.executorPair) {
@@ -153,8 +153,8 @@ export class RemoteSessionManager {
     // Load project sessions if needed
     this.setProjectContext(projectId)
 
-    // Fail fast on a missing configuration, like the old DAYTONA_API_KEY check, so a
-    // broken setup surfaces as a config error toast instead of cryptic SSH failures.
+    // Fail fast on a missing configuration so a broken setup surfaces as a config error
+    // toast instead of cryptic SSH failures.
     const { config, ssh } = this.getExecutorPair(worktree)
 
     const existing = this.sessionWorkspaces.get(sessionId)

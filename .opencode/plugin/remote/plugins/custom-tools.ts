@@ -5,18 +5,18 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin'
-import { createDaytonaTools } from '../tools'
+import { createRemoteTools } from '../tools'
 import { logger } from '../core/logger'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
 
 /**
- * Custom tools for Daytona sandbox: file ops, command execution, search.
+ * Custom tools for the remote machine: file ops, command execution, search.
  */
-export async function customTools(ctx: PluginInput, sessionManager: DaytonaSessionManager) {
-  logger.info('OpenCode started with Daytona plugin')
+export async function customTools(ctx: PluginInput, sessionManager: RemoteSessionManager) {
+  logger.info('OpenCode started with remote machine plugin')
   const projectId = ctx.project.id
   // Active worktree (not ctx.project.worktree, which is the first-seen checkout persisted
   // per project); see the matching comment in plugins/session-events.ts.
   const worktree = ctx.worktree
-  return createDaytonaTools(sessionManager, projectId, worktree, ctx)
+  return createRemoteTools(sessionManager, projectId, worktree, ctx)
 }

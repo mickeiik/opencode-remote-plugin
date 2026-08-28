@@ -5,24 +5,23 @@
  */
 
 /**
- * OpenCode Plugin: Daytona Sandbox Integration
+ * OpenCode Plugin: Remote Machine Integration
  *
  * OpenCode plugins extend the AI coding assistant by adding custom tools, handling events,
  * and modifying behavior. Plugins are TypeScript/JavaScript modules that export functions
  * which return hooks for various lifecycle events.
  *
- * This plugin integrates Daytona sandboxes with OpenCode, providing isolated development
- * environments for each session. It adds custom tools for file operations, command execution,
- * and search within sandboxes, and automatically cleans up resources when sessions end.
+ * This plugin runs every OpenCode session on a remote machine reached over SSH. It adds
+ * custom tools for file operations, command execution, and search on that machine, keeps
+ * each session's changes synchronized to a local `opencode/N` git branch, and cleans up
+ * local state when sessions end. Nothing on the remote machine is ever deleted.
  *
  * Learn more: https://opencode.ai/docs/plugins/
  *
- * Daytona Sandbox Integration Tools
- *
  * Requires:
- * - npm install @daytona/sdk
- * - Environment: DAYTONA_API_KEY
- * - Environment (optional): DAYTONA_SNAPSHOT - snapshot to create sandboxes from
+ * - Environment: REMOTE_HOST, REMOTE_PROJECT_PATH
+ * - Environment (optional): REMOTE_PORT, REMOTE_USER, REMOTE_SSH_KNOWN_HOSTS
+ *   (set them in the environment or in a .env file in the project root)
  */
 
 import { join } from 'path'
@@ -30,34 +29,37 @@ import { homedir } from 'os'
 import { xdgData } from 'xdg-basedir'
 import type { PluginInput } from '@opencode-ai/plugin'
 import { logger, setLogFilePath } from './core/logger'
-import { DaytonaSessionManager } from './core/session-manager'
+import { RemoteSessionManager } from './core/session-manager'
 import { SessionGitManager } from './git/session-git-manager'
 import { toast } from './core/toast'
 import { customTools } from './plugins/custom-tools'
 import { eventHandlers } from './plugins/session-events'
 import { systemPromptTransform } from './plugins/system-transform'
 
-export type { EventSessionDeleted, LogLevel, SandboxInfo, SessionInfo, ProjectSessionData } from './core/types'
+export type {
+  EventSessionDeleted,
+  EventSessionIdle,
+  ExperimentalChatSystemTransformInput,
+  ExperimentalChatSystemTransformOutput,
+  LogLevel,
+  ProjectSessionData,
+  RemoteSession,
+  SessionInfo,
+} from './core/types'
 
 const xdgDataDir = xdgData ?? join(homedir(), '.local', 'share')
-const LOG_FILE = join(xdgDataDir, 'opencode', 'log', 'daytona.log')
-const STORAGE_DIR = join(xdgDataDir, 'opencode', 'storage', 'daytona')
-const REPO_PATH = '/home/daytona/project'
+const LOG_FILE = join(xdgDataDir, 'opencode', 'log', 'remote.log')
+const STORAGE_DIR = join(xdgDataDir, 'opencode', 'storage', 'remote')
 
 setLogFilePath(LOG_FILE)
-const sessionManager = new DaytonaSessionManager(
-  process.env.DAYTONA_API_KEY || '',
-  STORAGE_DIR,
-  REPO_PATH,
-  process.env.DAYTONA_SNAPSHOT,
-)
+const sessionManager = new RemoteSessionManager(STORAGE_DIR)
 
-async function daytonaPlugin(ctx: PluginInput) {
+async function remotePlugin(ctx: PluginInput) {
   toast.initialize(ctx.client?.tui)
   return {
     tool: await customTools(ctx, sessionManager),
-    event: await eventHandlers(ctx, sessionManager, REPO_PATH),
-    'experimental.chat.system.transform': await systemPromptTransform(ctx, REPO_PATH),
+    event: await eventHandlers(ctx, sessionManager),
+    'experimental.chat.system.transform': await systemPromptTransform(ctx),
     // Awaited by OpenCode when the plugin scope closes (newer than the published Hooks
     // type, ignored by older versions). Draining here keeps a graceful shutdown from
     // abandoning a git sync that the unawaited `event` hook started on session.idle.
@@ -71,4 +73,4 @@ async function daytonaPlugin(ctx: PluginInput) {
   }
 }
 
-export default daytonaPlugin
+export default remotePlugin

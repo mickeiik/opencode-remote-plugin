@@ -5,23 +5,30 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin'
+import { resolveRemoteConfig } from '../core/config'
 import type { ExperimentalChatSystemTransformInput, ExperimentalChatSystemTransformOutput } from '../core/types'
 
 /**
- * Adds Daytona-specific instructions to the system prompt.
+ * Adds remote-machine instructions to the system prompt.
  */
-export async function systemPromptTransform(ctx: PluginInput, repoPath: string) {
+export async function systemPromptTransform(ctx: PluginInput) {
   return async (input: ExperimentalChatSystemTransformInput, output: ExperimentalChatSystemTransformOutput) => {
+    // Name the host when the config resolves; a missing config must never break the transform.
+    let host: string
+    try {
+      host = resolveRemoteConfig(ctx.worktree).host
+    } catch {
+      host = 'your remote machine'
+    }
     output.system.push(
       [
-        '## Daytona Sandbox Integration',
-        'This session is integrated with a Daytona sandbox.',
-        `The main project repository is located at: ${repoPath}.`,
-        'Bash commands will run in this directory.',
-        'Put all projects in the project directory. Do NOT try to use the current working directory of the host system.',
+        '## Remote Machine Integration',
+        `This session runs on your remote machine (${host}) over SSH.`,
+        'Your project workspace is a numbered directory under REMOTE_PROJECT_PATH on that machine.',
+        'Bash commands run in that workspace.',
         "When executing long-running commands, use the 'background' option to run them asynchronously.",
-        'Before showing a preview URL, ensure the server is running in the sandbox on that port.',
-        'When the user asks to sync, hand off, or finalize changes, run the gitSync tool and report its result.',
+        "To reach a dev server running on the remote machine, use 'ssh -L' from your machine to forward the port.",
+        "When the user asks to sync, hand off, or finalize changes, run the 'gitSync' tool and report its result.",
       ].join('\n'),
     )
   }

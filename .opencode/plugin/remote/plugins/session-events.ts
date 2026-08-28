@@ -9,12 +9,13 @@ import { SessionGitManager } from '../git/session-git-manager'
 import { EVENT_TYPE_SESSION_DELETED, EVENT_TYPE_SESSION_IDLE, type EventSessionDeleted } from '../core/types'
 import { toast } from '../core/toast'
 import { logger } from '../core/logger'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import { resolveRemoteConfig } from '../core/config'
+import type { RemoteSessionManager } from '../core/session-manager'
 
 /**
  * Handles OpenCode session events.
  */
-export async function eventHandlers(ctx: PluginInput, sessionManager: DaytonaSessionManager, repoPath: string) {
+export async function eventHandlers(ctx: PluginInput, sessionManager: RemoteSessionManager) {
   const projectId = ctx.project.id
   // Use the ACTIVE worktree, not ctx.project.worktree: the project worktree is persisted
   // the first time a project is opened and never updated, so in linked-worktree setups
@@ -26,12 +27,23 @@ export async function eventHandlers(ctx: PluginInput, sessionManager: DaytonaSes
     if (event.type === EVENT_TYPE_SESSION_DELETED) {
       const sessionId = (event as EventSessionDeleted).properties.info.id
       try {
-        const deleted = await sessionManager.deleteSandbox(sessionId, projectId)
+        const deleted = await sessionManager.deleteSession(sessionId, projectId)
         if (deleted) {
-          toast.show({ title: 'Session deleted', message: 'Sandbox deleted successfully.', variant: 'success' })
+          // Name the host when the config resolves; a missing config must not break deletion.
+          let host: string
+          try {
+            host = resolveRemoteConfig(worktree).host
+          } catch {
+            host = 'the remote machine'
+          }
+          toast.show({
+            title: 'Session removed',
+            message: `Remote files left untouched on ${host}.`,
+            variant: 'success',
+          })
         }
       } catch (err: any) {
-        toast.show({ title: 'Delete failed', message: err?.message || 'Failed to delete sandbox.', variant: 'error' })
+        toast.show({ title: 'Delete failed', message: err?.message || 'Failed to delete session.', variant: 'error' })
         throw err
       }
     } else if (event.type === EVENT_TYPE_SESSION_IDLE) {
@@ -39,16 +51,21 @@ export async function eventHandlers(ctx: PluginInput, sessionManager: DaytonaSes
       const start = Date.now()
       try {
         // The WHOLE pipeline is enqueued (synchronously, before any await) so that a
-        // dispose() or delete arriving while the sandbox is still being resolved cannot
+        // dispose() or delete arriving while the workspace is still being resolved cannot
         // observe an empty queue and proceed mid-operation.
         const didSync = await SessionGitManager.enqueueSessionSync(sessionId, async () => {
           // Re-checked inside the queue entry: a deletion may have completed while this
-          // callback waited its turn, and syncing must not resurrect the sandbox.
+          // callback waited its turn, and syncing must not resurrect the session.
           if (sessionManager.isSessionDeleting(sessionId)) return false
-          const sandbox = await sessionManager.getSandbox(sessionId, projectId, worktree, ctx)
-          const branchNumber = sessionManager.getBranchNumberForSandbox(projectId, sandbox.id)
-          if (!branchNumber) return false
-          const sessionGit = new SessionGitManager(sandbox, repoPath, worktree, branchNumber)
+          const session = await sessionManager.getRemoteSession(sessionId, projectId, worktree, ctx)
+          if (session.branchNumber === undefined) return false
+          const sessionGit = new SessionGitManager(
+            sessionManager.getSshExecutor(worktree),
+            session.workspacePath,
+            session.bareRepoPath,
+            worktree,
+            session.branchNumber,
+          )
           return sessionGit.autoCommitAndPull(ctx)
         })
         logger.info(`[idle] done sessionId=${sessionId} synced=${didSync} in ${Date.now() - start}ms`)
