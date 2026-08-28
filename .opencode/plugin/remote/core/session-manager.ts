@@ -5,307 +5,274 @@
  */
 
 /**
- * Manages Daytona sandbox sessions and persists session-sandbox mappings
- * Stores data per-project in ~/.local/share/opencode/storage/daytona/{projectId}.json
+ * Manages remote session workspaces over SSH and persists session→workspace mappings.
+ * The machine is persistent and unprovisioned: a session maps to a numbered workspace
+ * under REMOTE_PROJECT_PATH plus a bare repo for git sync; delete = final sync + local
+ * cleanup only — nothing on the remote is ever deleted.
+ * Stores data per-project in ~/.local/share/opencode/storage/remote/{projectId}.json
  */
 
-import {
-  Daytona,
-  DaytonaNotFoundError,
-  DaytonaValidationError,
-  type CreateSandboxFromSnapshotParams,
-  type Sandbox,
-} from '@daytona/sdk'
+import { basename, dirname } from 'path'
 import { logger } from './logger'
-import type { SessionSandboxMap, SandboxInfo, SessionInfo } from './types'
+import type { RemoteSession, SessionInfo } from './types'
 import { SessionGitManager } from '../git/session-git-manager'
-import { DaytonaSandboxGitManager } from '../git/sandbox-git-manager'
+import { RemoteGitManager } from '../git/remote-git-manager'
+import { HostGitManager } from '../git/host-git-manager'
 import { ProjectDataStorage } from './project-data-storage'
+import { resolveRemoteConfig, type RemoteConfig } from './config'
+import { shellQuote, SshExecutor } from './ssh'
 import type { PluginInput } from '@opencode-ai/plugin'
 import { toast } from './toast'
 
-export class DaytonaSessionManager {
-  private readonly apiKey: string
+export class RemoteSessionManager {
   private readonly dataStorage: ProjectDataStorage
-  private sessionSandboxes: SessionSandboxMap
-  // Sessions whose sandbox teardown has begun. getSandbox creates sandboxes on demand,
-  // so without this tombstone a sync queued behind a deletion would resurrect a fresh
-  // sandbox for a session that no longer exists (invisible, billed, never cleaned up).
+  /** Resolved remote config + SSH executor for this OpenCode instance, created lazily. */
+  private executorPair?: { config: RemoteConfig; ssh: SshExecutor }
+  private readonly sessionWorkspaces = new Map<string, RemoteSession>()
+  // Sessions whose teardown has begun; without this tombstone a sync queued behind a
+  // deletion would re-resolve a workspace for a session that no longer exists.
   private readonly deletingSessions = new Set<string>()
   private readonly deletionPromises = new Map<string, Promise<boolean>>()
   private currentProjectId?: string
-  public readonly repoPath: string
-  /** Snapshot new sandboxes are created from; undefined uses Daytona's default snapshot. */
-  public readonly snapshot?: string
 
-  constructor(apiKey: string, storageDir: string, repoPath: string, snapshot?: string) {
-    this.apiKey = apiKey
+  constructor(storageDir: string) {
     this.dataStorage = new ProjectDataStorage(storageDir)
-    this.repoPath = repoPath
-    this.snapshot = snapshot?.trim() || undefined
-    this.sessionSandboxes = new Map()
   }
 
   /**
-   * Check if a sandbox is fully initialized (has process property)
+   * Resolve the remote config for `worktree` and build the SSH executor, caching the
+   * pair. A missing configuration fails hard, mirroring the old DAYTONA_API_KEY check.
    */
-  private isFullyInitialized(sandbox: Sandbox | SandboxInfo | undefined): sandbox is Sandbox {
-    return sandbox !== undefined && 'process' in sandbox
+  private getExecutorPair(worktree: string): { config: RemoteConfig; ssh: SshExecutor } {
+    if (!this.executorPair) {
+      try {
+        const config = resolveRemoteConfig(worktree)
+        this.executorPair = { config, ssh: new SshExecutor(config) }
+      } catch (err) {
+        logger.error(`Remote configuration missing; cannot use a remote machine: ${err}`)
+        toast.show({
+          title: 'Remote error',
+          message:
+            'REMOTE_HOST and REMOTE_PROJECT_PATH must be set (in the environment or in a .env file in the project root) to use a remote machine.',
+          variant: 'error',
+        })
+        throw err
+      }
+    }
+    return this.executorPair
   }
 
-  /**
-   * Check if a sandbox is partially initialized (has id but not process)
-   */
-  private isPartiallyInitialized(sandbox: Sandbox | SandboxInfo | undefined): sandbox is SandboxInfo {
-    return sandbox !== undefined && 'id' in sandbox && !('process' in sandbox)
+  private getExecutor(worktree: string): SshExecutor {
+    return this.getExecutorPair(worktree).ssh
   }
 
-  /**
-   * Load sessions for a specific project into memory
-   */
+  /** In-memory handle for a stored session, rebuilt from its stored workspacePath. */
+  private buildHandle(sessionInfo: SessionInfo): RemoteSession {
+    const workspacePath = sessionInfo.workspacePath
+    return {
+      id: basename(workspacePath),
+      workspacePath,
+      // The bare repo always sits next to the workspace it serves: <root>/.bare/<N>.git.
+      bareRepoPath: `${dirname(workspacePath)}/.bare/${basename(workspacePath)}.git`,
+      ...(sessionInfo.branchNumber !== undefined ? { branchNumber: sessionInfo.branchNumber } : {}),
+    }
+  }
+
+  /** Load sessions for a specific project into memory */
   private loadProjectSessions(projectId: string): void {
     const projectData = this.dataStorage.load(projectId)
     if (projectData) {
       for (const [sessionId, sessionInfo] of Object.entries(projectData.sessions)) {
-        this.sessionSandboxes.set(sessionId, { id: sessionInfo.sandboxId })
+        this.sessionWorkspaces.set(sessionId, this.buildHandle(sessionInfo))
       }
       logger.info(`Loaded ${Object.keys(projectData.sessions).length} sessions for project ${projectId}`)
     }
   }
 
-  /**
-   * Set the current project context
-   */
+  /** Set the current project context */
   setProjectContext(projectId: string): void {
     if (this.currentProjectId !== projectId) {
       this.currentProjectId = projectId
-      this.sessionSandboxes.clear()
+      this.sessionWorkspaces.clear()
       this.loadProjectSessions(projectId)
     }
   }
 
-  /**
-   * Get branch number for a sandbox
-   */
-  getBranchNumberForSandbox(projectId: string, sandboxId: string): number | undefined {
-    return this.dataStorage.getBranchNumberForSandbox(projectId, sandboxId)
+  /** Create the workspace directory on the remote machine */
+  private async ensureWorkspaceDirectory(ssh: SshExecutor, workspacePath: string): Promise<void> {
+    const result = await ssh.exec(`mkdir -p ${shellQuote(workspacePath)}`)
+    if (result.code !== 0) {
+      throw new Error(`Failed to create remote workspace directory ${workspacePath}: ${result.stderr || result.stdout}`)
+    }
   }
 
   /**
-   * Get or create a sandbox for the given session ID
+   * Next workspace number when git is disabled: highest numeric entry in the project
+   * root plus one (1 when there are none). The root is created first so a missing
+   * directory (first session ever) can't be mistaken for an ls failure; a real ls
+   * failure throws instead of silently reusing workspace 1.
    */
-  async getSandbox(sessionId: string, projectId: string, worktree: string, pluginCtx?: PluginInput): Promise<Sandbox> {
+  private async allocateWorkspaceNumber(ssh: SshExecutor, projectPath: string): Promise<number> {
+    const mkdir = await ssh.exec(`mkdir -p ${shellQuote(projectPath)}`)
+    if (mkdir.code !== 0) {
+      throw new Error(`Failed to create remote project root ${projectPath}: ${mkdir.stderr || mkdir.stdout}`)
+    }
+    const result = await ssh.exec(`ls -1 ${shellQuote(projectPath)}`)
+    if (result.code !== 0) {
+      throw new Error(`Failed to list remote project root ${projectPath}: ${result.stderr || result.stdout}`)
+    }
+    let max = 0
+    for (const line of result.stdout.split('\n')) {
+      const entry = line.trim()
+      if (!/^\d+$/.test(entry)) continue
+      max = Math.max(max, Number.parseInt(entry, 10))
+    }
+    return max + 1
+  }
+
+  /**
+   * Get or create the remote workspace for the given session ID
+   */
+  async getRemoteSession(
+    sessionId: string,
+    projectId: string,
+    worktree: string,
+    pluginCtx?: PluginInput,
+  ): Promise<RemoteSession> {
+    if (this.deletingSessions.has(sessionId)) {
+      throw new Error(`Session ${sessionId} is deleted; not creating a new remote workspace for it.`)
+    }
     if (pluginCtx?.client?.tui) {
       toast.initialize(pluginCtx.client.tui)
-    }
-    if (this.deletingSessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} is deleted; not creating a new sandbox for it.`)
-    }
-    if (!this.apiKey) {
-      logger.error('DAYTONA_API_KEY is not set. Cannot create or retrieve sandbox.')
-      toast.show({
-        title: 'Sandbox error',
-        message: 'DAYTONA_API_KEY is not set. Please set the environment variable to use Daytona sandboxes.',
-        variant: 'error',
-      })
-      throw new Error('DAYTONA_API_KEY is not set. Please set the environment variable to use Daytona sandboxes.')
     }
 
     // Load project sessions if needed
     this.setProjectContext(projectId)
 
-    const existing = this.sessionSandboxes.get(sessionId)
+    // Fail fast on a missing configuration, like the old DAYTONA_API_KEY check, so a
+    // broken setup surfaces as a config error toast instead of cryptic SSH failures.
+    const { config, ssh } = this.getExecutorPair(worktree)
 
-    // If we have a fully initialized sandbox, reuse it
-    if (this.isFullyInitialized(existing)) {
-      // Refresh sandbox state and ensure it's running
-      await existing.refreshData()
-      if (existing.state !== 'started') {
-        logger.info(`Starting sandbox ${existing.id} (current state: ${existing.state})`)
-        await existing.start()
-      }
-      this.ensureNotDeleted(sessionId)
-      this.dataStorage.updateSession(projectId, worktree, sessionId, existing.id)
+    const existing = this.sessionWorkspaces.get(sessionId)
+
+    // Known session: refresh its storage entry (lastAccessed) and reuse the handle
+    if (existing) {
+      this.dataStorage.updateSession(projectId, worktree, sessionId, existing.workspacePath, existing.branchNumber)
       return existing
     }
 
-    // If we have a sandboxId but not a full sandbox object, reconnect to it
-    if (this.isPartiallyInitialized(existing)) {
-      try {
-        logger.info(`Reconnecting to existing sandbox: ${existing.id}`)
-        const daytona = new Daytona({ apiKey: this.apiKey })
-        const reconnectStart = Date.now()
-        logger.info(`Daytona get begin sandboxId=${existing.id}`)
-        const sandbox = await daytona.get(existing.id)
-        logger.info(`Daytona get done sandboxId=${existing.id} in ${Date.now() - reconnectStart}ms`)
-        logger.info(`Starting sandbox begin sandboxId=${sandbox.id}`)
-        await sandbox.start()
-        logger.info(`Starting sandbox done sandboxId=${sandbox.id} in ${Date.now() - reconnectStart}ms`)
-        this.ensureNotDeleted(sessionId)
-        this.sessionSandboxes.set(sessionId, sandbox)
-        // Preserve branch number if it exists for this sandbox
-        let branchNumber = this.dataStorage.getBranchNumberForSandbox(projectId, sandbox.id)
-        if (!branchNumber) {
-          try {
-            branchNumber = SessionGitManager.allocateAndReserveBranchNumber(worktree)
-          } catch {
-            // No local git repo (or git unavailable) shouldn't block sandbox usage.
-            branchNumber = undefined
+    // Known from storage (possibly migrated from another project): reconnect to the
+    // workspace recorded there.
+    const stored = this.dataStorage.getSession(projectId, worktree, sessionId)
+    if (stored?.workspacePath) {
+      logger.info(`Reconnecting to existing remote workspace: ${stored.workspacePath}`)
+      const handle = this.buildHandle(stored)
+      const remoteGit = new RemoteGitManager(ssh, handle.workspacePath, handle.bareRepoPath)
+      await this.ensureWorkspaceDirectory(ssh, handle.workspacePath)
+      await remoteGit.ensureRepo()
+
+      // A workspace whose .git was lost remotely has no commits to resume from; recover
+      // it by re-running the init flow, restoring the session's last synced state from
+      // the local opencode/N branch when that ref still exists. Best-effort: the
+      // directory itself is already usable (e.g. a local repo with no commits cannot
+      // seed it), so a failed recovery must not take the session down.
+      if (handle.branchNumber !== undefined && (await remoteGit.getHeadOid()) === '') {
+        try {
+          logger.warn(`Remote workspace ${handle.workspacePath} lost its git repo; re-initializing from local branch.`)
+          await remoteGit.ensureBareRepo()
+          const hostGit = new HostGitManager(ssh.knownHosts)
+          if (hostGit.getRefOid(worktree, `refs/heads/opencode/${handle.branchNumber}`) !== '') {
+            await hostGit.pushLocalToSandboxRemote(
+              `sandbox-${handle.branchNumber}`,
+              ssh.sshUrl(handle.bareRepoPath),
+              'opencode',
+              worktree,
+            )
           }
-        }
-        this.dataStorage.updateSession(projectId, worktree, sessionId, sandbox.id, branchNumber)
-        toast.show({
-          title: 'Sandbox connected',
-          message: `Connected to existing sandbox.`,
-          variant: 'info',
-        })
-
-        // Even if git syncing is disabled, ensure the project directory exists in the sandbox.
-        if (!branchNumber) {
-          try {
-            await new DaytonaSandboxGitManager(sandbox, this.repoPath).ensureDirectory()
-          } catch (err) {
-            logger.warn(`Failed to ensure sandbox project directory exists: ${err}`)
-          }
-        }
-
-        return sandbox
-      } catch (err) {
-        // Only treat 404 as "sandbox is confirmed gone" — clear the mapping and fall through
-        // to create a replacement. For transient errors (network, auth, timeout, provisioning),
-        // preserve the mapping and propagate so the caller can retry later without losing the
-        // session→sandbox binding and its branchNumber.
-        if (err instanceof DaytonaNotFoundError) {
-          logger.error(`Sandbox ${existing.id} no longer exists; creating a replacement.`)
-          this.sessionSandboxes.delete(sessionId)
-          this.dataStorage.removeSession(projectId, worktree, sessionId)
-        } else {
-          logger.error(`Failed to reconnect to sandbox ${existing.id}: ${err}`)
-          throw err
-        }
-      }
-    }
-
-    // If not in cache/storage for this project, try to recover from other projects and migrate.
-    if (!existing) {
-      const migrated = this.dataStorage.getSession(projectId, worktree, sessionId)
-      if (migrated?.sandboxId) {
-        logger.info(`Recovered session ${sessionId} for project ${projectId} (migrated from another project)`)
-        this.sessionSandboxes.set(sessionId, { id: migrated.sandboxId })
-        // Re-run getSandbox to go through the normal reconnect path.
-        return this.getSandbox(sessionId, projectId, worktree, pluginCtx)
-      }
-    }
-
-    // Otherwise, create a new sandbox
-    logger.info(`Creating new sandbox for session: ${sessionId} in project: ${projectId}`)
-    const daytona = new Daytona({ apiKey: this.apiKey })
-    // Omit the key entirely when unset so Daytona applies its default snapshot.
-    const createParams: CreateSandboxFromSnapshotParams = this.snapshot ? { snapshot: this.snapshot } : {}
-    const createStart = Date.now()
-    logger.info(`Daytona create begin sessionId=${sessionId} snapshot=${this.snapshot ?? '(default)'}`)
-    const waitingLog = setTimeout(() => {
-      logger.warn(`Daytona create still waiting after ${Date.now() - createStart}ms (sessionId=${sessionId})`)
-    }, 15_000)
-    const sandbox = await daytona
-      .create(createParams)
-      .catch((err: unknown) => {
-        // Only blame the snapshot when the request itself was rejected. The create
-        // params contain nothing but the snapshot name, so a validation error means
-        // Daytona refused that name (empirically: "Snapshot <name> not found" is a
-        // DaytonaValidationError). Auth, network, quota, and timeout failures are
-        // unrelated to DAYTONA_SNAPSHOT and propagate unattributed, as before.
-        if (this.snapshot && err instanceof DaytonaValidationError) {
-          logger.error(`Failed to create sandbox from snapshot '${this.snapshot}': ${err}`)
+          await remoteGit.initFromBare('opencode')
+        } catch (err: any) {
+          logger.error(`Failed to recover git repo in remote workspace ${handle.workspacePath}: ${err}`)
           toast.show({
-            title: 'Sandbox error',
-            message: `Verify DAYTONA_SNAPSHOT names an available snapshot: ${err.message}`,
+            title: 'Git error',
+            message: err?.message || 'Failed to recover the remote workspace git repository.',
             variant: 'error',
           })
         }
-        throw err
-      })
-      .finally(() => clearTimeout(waitingLog))
-    logger.info(`Daytona create done sessionId=${sessionId} sandboxId=${sandbox.id} in ${Date.now() - createStart}ms`)
-    if (this.deletingSessions.has(sessionId)) {
-      // The session was deleted while creation was in flight. The fresh sandbox is not
-      // registered anywhere, so nothing else will ever clean it up - discard it here.
-      logger.warn(`Session ${sessionId} was deleted during sandbox creation; discarding sandbox ${sandbox.id}`)
-      try {
-        await sandbox.delete()
-      } catch (err) {
-        logger.error(`Failed to discard sandbox ${sandbox.id} for deleted session ${sessionId}: ${err}`)
-        throw new Error(
-          `Session ${sessionId} is deleted and discarding newly created sandbox ${sandbox.id} failed; if it still exists, delete it from the Daytona dashboard.`,
-        )
       }
-      throw new Error(`Session ${sessionId} is deleted; the newly created sandbox was discarded.`)
-    }
-    this.sessionSandboxes.set(sessionId, sandbox)
 
-    // Get or assign branch number for this sandbox
-    let branchNumber = this.dataStorage.getBranchNumberForSandbox(projectId, sandbox.id)
-
-    if (!branchNumber) {
-      try {
-        branchNumber = SessionGitManager.allocateAndReserveBranchNumber(worktree)
-      } catch (err: any) {
-        logger.warn(`allocateAndReserveBranchNumber failed sessionId=${sessionId}: ${err}`)
-        // No local git repo (or git unavailable) shouldn't block sandbox usage.
-        branchNumber = undefined
-      }
+      // Deletion may have raced the reconnect awaits above.
+      this.ensureNotDeleted(sessionId)
+      this.sessionWorkspaces.set(sessionId, handle)
+      this.dataStorage.updateSession(projectId, worktree, sessionId, handle.workspacePath, handle.branchNumber)
+      toast.show({ title: 'Connected', message: 'Connected to remote workspace.', variant: 'info' })
+      return handle
     }
 
-    this.dataStorage.updateSession(projectId, worktree, sessionId, sandbox.id, branchNumber)
-    logger.info(
-      `Sandbox created successfully: ${sandbox.id}${branchNumber ? ` with branch number ${branchNumber}` : ''}`,
-    )
-
-    // Initialize git repo in the sandbox and sync with host
+    // Otherwise, create a new workspace
+    logger.info(`Creating new remote workspace for session: ${sessionId} in project: ${projectId}`)
+    let branchNumber: number | undefined
     try {
-      if (branchNumber) {
-        const sessionGit = new SessionGitManager(sandbox, this.repoPath, worktree, branchNumber)
-        await sessionGit.initializeAndSync(pluginCtx)
-      } else {
-        // Git disabled; still ensure the directory exists so tools can operate.
-        await new DaytonaSandboxGitManager(sandbox, this.repoPath).ensureDirectory()
-      }
-    } catch (err: any) {
-      logger.error(`Failed to initialize git repo or push local changes in sandbox: ${err}`)
-      toast.show({
-        title: 'Git error',
-        message: err?.message || 'Failed to initialize git repo in sandbox.',
-        variant: 'error',
-      })
+      branchNumber = SessionGitManager.allocateAndReserveBranchNumber(worktree)
+    } catch (err) {
+      logger.warn(`allocateAndReserveBranchNumber failed sessionId=${sessionId}: ${err}`)
+      // No local git repo (or git unavailable) shouldn't block workspace usage.
+      branchNumber = undefined
     }
-    // Deletion may have raced the initialization awaits above; the mapping was already
-    // registered, so the delete flow owns (and removes) the sandbox itself - returning
-    // it would hand callers a destroyed sandbox that fails confusingly on first use.
+    const workspaceNumber = branchNumber ?? (await this.allocateWorkspaceNumber(ssh, config.projectPath))
+    const workspacePath = `${config.projectPath}/${workspaceNumber}`
+    const bareRepoPath = `${config.projectPath}/.bare/${workspaceNumber}.git`
+
+    await this.ensureWorkspaceDirectory(ssh, workspacePath)
+    if (branchNumber !== undefined) {
+      try {
+        await new SessionGitManager(ssh, workspacePath, bareRepoPath, worktree, branchNumber).initializeAndSync(
+          pluginCtx,
+        )
+      } catch (err: any) {
+        logger.error(`Failed to initialize git repo or push local changes to the remote machine: ${err}`)
+        toast.show({
+          title: 'Git error',
+          message: err?.message || 'Failed to initialize git repo on the remote machine.',
+          variant: 'error',
+        })
+      }
+    }
+
+    // Deletion may have raced the initialization awaits above.
     this.ensureNotDeleted(sessionId)
+    this.dataStorage.updateSession(projectId, worktree, sessionId, workspacePath, branchNumber)
+    const handle: RemoteSession = {
+      id: String(workspaceNumber),
+      workspacePath,
+      bareRepoPath,
+      ...(branchNumber !== undefined ? { branchNumber } : {}),
+    }
+    this.sessionWorkspaces.set(sessionId, handle)
     toast.show({
-      title: 'Sandbox created',
-      message: `Created new sandbox for session.`,
+      title: 'Session started',
+      message: `Session started on ${config.host} (workspace ${workspacePath})`,
       variant: 'success',
     })
-    return sandbox
+    return handle
   }
 
   /**
-   * Delete the sandbox associated with the given session ID
+   * Delete the local mapping for the given session ID. Nothing on the remote machine is
+   * removed: after one final best-effort sync, only the in-memory handle, the stored
+   * mapping, and the session's local git remote are cleaned up.
    */
-  async deleteSandbox(sessionId: string, projectId: string): Promise<boolean> {
+  async deleteSession(sessionId: string, projectId: string): Promise<boolean> {
     // Concurrent deletes share one promise: a second teardown racing the first would
-    // observe the already-deleted sandbox, throw, and wrongly clear the tombstone.
+    // observe the already-deleted session and wrongly clear the tombstone.
     const inFlight = this.deletionPromises.get(sessionId)
     if (inFlight) return inFlight
 
-    // Tombstone first, removed again on failure: while set, no code path may create or
-    // reconnect a sandbox for this session. Kept after success on purpose - the session
-    // is gone, and any late event for it must no-op instead of resurrecting a sandbox.
+    // Tombstone first, removed again on failure; kept after success on purpose - any
+    // late event for a gone session must no-op instead of resurrecting a workspace.
     this.deletingSessions.add(sessionId)
     const run = (async () => {
       try {
-        return await this.deleteSandboxInner(sessionId, projectId)
+        return await this.deleteSessionInner(sessionId, projectId)
       } catch (err) {
         this.deletingSessions.delete(sessionId)
         throw err
@@ -317,109 +284,47 @@ export class DaytonaSessionManager {
     return run
   }
 
-  private async deleteSandboxInner(sessionId: string, projectId: string): Promise<boolean> {
+  private async deleteSessionInner(sessionId: string, projectId: string): Promise<boolean> {
     await SessionGitManager.waitForPendingSync(sessionId)
 
-    let sandbox = this.sessionSandboxes.get(sessionId)
-
+    const handle = this.sessionWorkspaces.get(sessionId)
     // Read-only lookup so deleting never migrates sessions or rewrites project metadata.
     const stored = this.dataStorage.findSession(sessionId)
+    const existed = handle !== undefined || stored !== undefined
 
-    let sandboxGone = false
-
-    // If not in cache, try to load from storage and reconnect
-    if (!sandbox || this.isPartiallyInitialized(sandbox)) {
-      if (stored?.session.sandboxId) {
-        const daytona = new Daytona({ apiKey: this.apiKey })
-        try {
-          sandbox = await daytona.get(stored.session.sandboxId)
-          this.sessionSandboxes.set(sessionId, sandbox)
-        } catch (err) {
-          if (err instanceof DaytonaNotFoundError) {
-            sandboxGone = true
-            logger.warn(`Sandbox ${stored.session.sandboxId} no longer exists; clearing stale mapping.`)
-          } else {
-            // Non-404: we cannot confirm the sandbox is gone. Surface the error so the
-            // event handler shows a "Delete failed" toast instead of silently reporting
-            // success while leaving a running sandbox on the Daytona account.
-            logger.error(`Failed to reconnect to sandbox ${stored.session.sandboxId}: ${err}`)
-            throw err
-          }
-        }
-      } else {
-        sandboxGone = true
+    // Final sync into the local opencode/N branch, as ONE queue entry so nothing can slot
+    // in between draining pending syncs and pulling the last changes. Best-effort: unlike
+    // upstream, a failed final sync must not block deletion — remote files are never at risk.
+    const branchNumber = handle?.branchNumber ?? stored?.session.branchNumber
+    const workspacePath = handle?.workspacePath ?? stored?.session.workspacePath
+    if (branchNumber !== undefined && workspacePath && stored?.worktree) {
+      try {
+        const ssh = this.getExecutor(stored.worktree)
+        const bareRepoPath = handle?.bareRepoPath ?? `${dirname(workspacePath)}/.bare/${basename(workspacePath)}.git`
+        const sessionGit = new SessionGitManager(ssh, workspacePath, bareRepoPath, stored.worktree, branchNumber)
+        await SessionGitManager.enqueueSessionSync(sessionId, () => sessionGit.autoCommitAndPull())
+      } catch (err) {
+        logger.warn(`Final sync before deletion failed for session ${sessionId}; continuing with cleanup: ${err}`)
       }
     }
 
-    // Delete the sandbox if we have a fully initialized one
-    let deleted = false
-    if (this.isFullyInitialized(sandbox)) {
-      // Final sync and deletion run as ONE queue entry, so a sync enqueued between the
-      // wait above and this point is drained first, and nothing can slot in between
-      // pulling the last changes and destroying the sandbox.
-      const target = sandbox
-      await SessionGitManager.enqueueSessionSync(sessionId, async () => {
-        await this.syncBeforeDelete(target, stored)
-        logger.info(`Removing sandbox for session: ${sessionId}`)
-        await target.delete()
-      })
-      deleted = true
-      sandboxGone = true
-      logger.info(`Sandbox deleted successfully.`)
-    } else {
-      logger.warn(`No sandbox found for session: ${sessionId}`)
+    // Local-only cleanup; remote files are left untouched on purpose.
+    this.sessionWorkspaces.delete(sessionId)
+    const cleanupProjectId = stored?.projectId ?? projectId
+    const cleanupWorktree = stored?.worktree ?? this.dataStorage.load(projectId)?.worktree ?? ''
+    this.dataStorage.removeSession(cleanupProjectId, cleanupWorktree, sessionId)
+    if (branchNumber !== undefined && stored?.worktree) {
+      new HostGitManager().removeRemote(`sandbox-${branchNumber}`, stored.worktree)
     }
 
-    // Clear the local mapping when the sandbox is gone (deleted or already absent) so a
-    // stale entry can't cause repeated reconnect failures. Preserve it on transient errors.
-    if (sandboxGone) {
-      this.sessionSandboxes.delete(sessionId)
-      const cleanupProjectId = stored?.projectId ?? projectId
-      const cleanupWorktree = stored?.worktree ?? this.dataStorage.load(projectId)?.worktree ?? ''
-      this.dataStorage.removeSession(cleanupProjectId, cleanupWorktree, sessionId)
-    }
-
-    return deleted
+    return existed
   }
 
-  /**
-   * Pull not-yet-synced sandbox changes into the local repo before the sandbox is
-   * destroyed. Throws — aborting deletion so the sandbox is preserved — when unsynced
-   * changes cannot be pulled, including when the local repository itself is no longer
-   * accessible (a silent skip there would destroy the only copy of the work). A sandbox
-   * that is not running is deleted without being started: anything in it was either
-   * synced while it ran or is abandoned by the explicit delete.
-   *
-   * Runs inside the session's sync queue; it must NOT enqueue (that would deadlock).
-   */
-  private async syncBeforeDelete(sandbox: Sandbox, stored: { worktree: string; session: SessionInfo } | undefined) {
-    const branchNumber = stored?.session.branchNumber
-    if (!branchNumber || !stored?.worktree) return
-    await sandbox.refreshData()
-    if (sandbox.state !== 'started') return
-    const sessionGit = new SessionGitManager(sandbox, this.repoPath, stored.worktree, branchNumber)
-    if (!sessionGit.hasLocalRepo()) {
-      throw new Error(
-        `Local repository at ${stored.worktree} is not accessible, so unsynced sandbox changes cannot be pulled; the sandbox was not deleted. Restore the repository or delete the sandbox from the Daytona dashboard.`,
-      )
-    }
-    try {
-      await sessionGit.autoCommitAndPull()
-    } catch (err: any) {
-      throw new Error(
-        `Sandbox has changes that could not be synced to the local repository; the sandbox was not deleted. ${err?.message ?? err}`,
-      )
-    }
-  }
-
-  /**
-   * Read-only check for a session→sandbox mapping (memory or storage); never creates,
-   * migrates, or connects.
-   */
-  hasSandbox(sessionId: string, projectId: string): boolean {
+  /** Read-only check for a session→workspace mapping; never creates, migrates, or connects. */
+  hasSession(sessionId: string, projectId: string): boolean {
     if (this.deletingSessions.has(sessionId)) return false
     this.setProjectContext(projectId)
-    if (this.sessionSandboxes.has(sessionId)) return true
+    if (this.sessionWorkspaces.has(sessionId)) return true
     return this.dataStorage.findSession(sessionId) !== undefined
   }
 
@@ -429,12 +334,12 @@ export class DaytonaSessionManager {
 
   /**
    * Guard for registration points that follow an await: deletion may have started (and
-   * finished) while a sandbox was being refreshed or reconnected, and persisting the
-   * mapping afterwards would resurrect state for a session that no longer exists.
+   * finished) while a workspace was being prepared, and persisting the mapping afterwards
+   * would resurrect state for a session that no longer exists.
    */
   private ensureNotDeleted(sessionId: string): void {
     if (this.deletingSessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} was deleted while its sandbox was being prepared.`)
+      throw new Error(`Session ${sessionId} was deleted while its remote workspace was being prepared.`)
     }
   }
 }
