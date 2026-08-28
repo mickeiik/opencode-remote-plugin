@@ -4,36 +4,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Sandbox } from '@daytona/sdk'
+import type { SshExecutor } from '../core/ssh'
 import { logger } from '../core/logger'
 import { toast } from '../core/toast'
-import { DaytonaSandboxGitManager } from './sandbox-git-manager'
+import { RemoteGitManager } from './remote-git-manager'
 import { HostGitManager } from './host-git-manager'
 import type { PluginInput } from '@opencode-ai/plugin'
 
 /**
- * SessionGitManager: Combines DaytonaSandboxGitManager and HostGitManager for session lifecycle git operations.
+ * SessionGitManager: Combines RemoteGitManager and HostGitManager for session lifecycle git operations.
  */
 export class SessionGitManager {
-  private readonly sandboxGit: DaytonaSandboxGitManager
+  private readonly remoteGit: RemoteGitManager
   private readonly hostGit: HostGitManager
-  private readonly sandbox: Sandbox
-  private readonly repoPath: string
+  private readonly ssh: SshExecutor
+  private readonly workspacePath: string
+  private readonly bareRepoPath: string
   private readonly worktree: string
   private readonly branch: string
   private readonly localBranch: string
   /** Numbered remote (sandbox-2) matches localBranch (opencode/2) */
   private readonly remoteName: string
 
-  constructor(sandbox: Sandbox, repoPath: string, worktree: string, branchNumber: number) {
-    this.sandbox = sandbox
-    this.repoPath = repoPath
+  constructor(ssh: SshExecutor, workspacePath: string, bareRepoPath: string, worktree: string, branchNumber: number) {
+    this.ssh = ssh
+    this.workspacePath = workspacePath
+    this.bareRepoPath = bareRepoPath
     this.worktree = worktree
     this.branch = 'opencode'
     this.localBranch = `opencode/${branchNumber}`
     this.remoteName = `sandbox-${branchNumber}`
-    this.sandboxGit = new DaytonaSandboxGitManager(sandbox, repoPath)
-    this.hostGit = new HostGitManager()
+    this.remoteGit = new RemoteGitManager(ssh, workspacePath, bareRepoPath)
+    this.hostGit = new HostGitManager(ssh.knownHosts)
   }
 
   /**
@@ -104,9 +106,12 @@ export class SessionGitManager {
     return true
   }
 
-  private async getSshUrl(): Promise<string> {
-    const sshAccess = await this.sandbox.createSshAccess(10)
-    return `ssh://${sshAccess.token}@ssh.app.daytona.io${this.repoPath}`
+  /**
+   * The host's git remote always points at the per-session bare repository — one
+   * stable URL that survives workspace re-initialization.
+   */
+  private getSshUrl(): string {
+    return this.ssh.sshUrl(this.bareRepoPath)
   }
 
   hasLocalRepo(): boolean {
@@ -114,18 +119,21 @@ export class SessionGitManager {
   }
 
   /**
-   * Initialize git in the sandbox and sync with host
-   * Used when a new sandbox is created for a session
+   * Initialize git on the remote machine and sync with host
+   * Used when a new remote workspace is created for a session
    */
   async initializeAndSync(pluginCtx?: PluginInput) {
     if (pluginCtx?.client?.tui) {
       toast.initialize(pluginCtx.client.tui)
     }
     try {
-      // Check if local git repo exists before initializing sandbox repo
+      // Both run before the local-repo check below: the workspace directory must exist
+      // for tools even when git syncing is disabled, and the bare repo is idempotent.
+      await this.remoteGit.ensureBareRepo()
+      await this.remoteGit.ensureDirectory()
+
+      // Check if local git repo exists before initializing the remote workspace
       if (!this.hostGit.hasRepo(this.worktree)) {
-        // Always ensure the directory exists, even if git syncing is disabled
-        await this.sandboxGit.ensureDirectory()
         logger.warn('No local git repository found. Git syncing is disabled.')
         toast.show({
           title: 'Git syncing disabled',
@@ -135,11 +143,10 @@ export class SessionGitManager {
         return
       }
 
-      await this.sandboxGit.ensureRepo()
-      const sshUrl = await this.getSshUrl()
+      const sshUrl = this.getSshUrl()
       const pushed = await this.hostGit.pushLocalToSandboxRemote(this.remoteName, sshUrl, this.branch, this.worktree)
       if (pushed) {
-        await this.sandboxGit.resetToRemote(this.branch)
+        await this.remoteGit.initFromBare(this.branch)
       }
     } catch (err: any) {
       toast.show({
@@ -152,7 +159,7 @@ export class SessionGitManager {
   }
 
   /**
-   * Auto-commit in the sandbox and pull latest from host
+   * Auto-commit in the remote workspace and pull latest from host
    * Used on session idle
    * Returns true if changes were synced, false if no changes or no local repo
    */
@@ -167,24 +174,27 @@ export class SessionGitManager {
         return false
       }
 
-      await this.sandboxGit.ensureRepo()
-      await this.sandboxGit.autoCommit()
+      await this.remoteGit.ensureRepo()
+      await this.remoteGit.autoCommit()
 
-      // Pull whenever the sandbox tip differs from the local opencode/N ref, not only
+      // Pull whenever the remote tip differs from the local opencode/N ref, not only
       // when this call created a commit: a previous sync may have committed in the
-      // sandbox and then failed to pull, and a status-only check would skip those
-      // stranded commits forever (and let the delete path destroy them).
-      const sandboxHead = await this.sandboxGit.getHeadOid()
-      if (!sandboxHead || sandboxHead === this.hostGit.getRefOid(this.worktree, `refs/heads/${this.localBranch}`)) {
+      // remote workspace and then failed to pull, and a status-only check would skip
+      // those stranded commits forever (and let the delete path destroy them).
+      const remoteHead = await this.remoteGit.getHeadOid()
+      if (!remoteHead || remoteHead === this.hostGit.getRefOid(this.worktree, `refs/heads/${this.localBranch}`)) {
         return false
       }
 
-      const sshUrl = await this.getSshUrl()
+      const sshUrl = this.getSshUrl()
 
-      // Pull the branch the sandbox actually committed to, which may differ from the
-      // initial 'opencode' branch, so commits are never left unsynced.
-      const sandboxBranch = await this.sandboxGit.getCurrentBranch()
-      await this.hostGit.pull(this.remoteName, sshUrl, sandboxBranch, this.worktree, this.localBranch)
+      // Pull the branch the remote workspace actually committed to, which may differ
+      // from the initial 'opencode' branch, so commits are never left unsynced. The
+      // workspace first force-pushes its HEAD to the bare repo (over the local remote
+      // path); the host then pulls that branch from the bare repo.
+      const branch = await this.remoteGit.getCurrentBranch()
+      await this.remoteGit.pushToBare(branch)
+      await this.hostGit.pull(this.remoteName, sshUrl, branch, this.worktree, this.localBranch)
       toast.show({
         title: 'Changes synced',
         message: `Changes have been synced to ${this.localBranch} in your local repository`,
@@ -197,7 +207,7 @@ export class SessionGitManager {
         message: err?.message || 'Failed to auto-commit and pull.',
         variant: 'error',
       })
-      logger.error(`[idle/git] error sandboxId=${this.sandbox.id}: ${err}`)
+      logger.error(`[idle/git] error workspacePath=${this.workspacePath}: ${err}`)
       throw err
     }
   }

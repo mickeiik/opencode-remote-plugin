@@ -37,51 +37,6 @@ function execGit(args: string[], options: ExecOptions = {}): ExecResult {
   return { ok: status === 0, stdout: res.stdout ?? '', stderr: res.stderr ?? '', status }
 }
 
-// Always sets GIT_SSH_COMMAND so host-side git transfers (push/fetch to the remote
-// machine) go through ssh with the same BatchMode, connection reuse (ControlMaster)
-// and keepalive behavior as SshExecutor command execution. When REMOTE_SSH_KNOWN_HOSTS
-// names a known_hosts file, host verification for the transfer is additionally pinned
-// to it: this lets the first noninteractive sync succeed without trust-on-first-use,
-// and without changing SSH behavior for any other remote. Unset means inherited
-// host-key behavior for the transfer itself.
-//
-// The value crosses two parsers. sh splits GIT_SSH_COMMAND into ssh's argv (outer
-// single quotes, applied per argument below), then OpenSSH splits the
-// UserKnownHostsFile VALUE on whitespace as a file list (inner double quotes keep a
-// spaced path as one file). OpenSSH's config grammar has no escape for a literal
-// double quote inside a quoted value, so such paths are rejected instead of being
-// silently mis-pinned.
-//
-// Reads process.env directly rather than the .env-resolved RemoteConfig, which this
-// class does not receive — a value set only in .env therefore pins SshExecutor
-// commands but not git transfers. Revisit when config is wired through the callers.
-function networkEnv(): NodeJS.ProcessEnv {
-  const knownHosts = process.env.REMOTE_SSH_KNOWN_HOSTS?.trim()
-  if (knownHosts?.includes('"')) {
-    throw new Error('REMOTE_SSH_KNOWN_HOSTS must not contain a double quote (") character')
-  }
-  // Each ssh argument is single-quoted: sh re-splits GIT_SSH_COMMAND, and values like
-  // the ControlPath socket template must survive that split as single arguments.
-  const sshCommand = ['ssh', ...sshCommonArgs().map(shellQuote)]
-  if (knownHosts) {
-    sshCommand.push(
-      '-o',
-      shellQuote(`UserKnownHostsFile="${knownHosts}"`),
-      '-o',
-      'GlobalKnownHostsFile=/dev/null',
-      '-o',
-      'StrictHostKeyChecking=yes',
-    )
-  }
-  return {
-    ...process.env,
-    // GlobalKnownHostsFile=/dev/null: otherwise a matching entry in the system-wide
-    // /etc/ssh/ssh_known_hosts would also be accepted and verification would not be
-    // pinned to the configured file alone.
-    GIT_SSH_COMMAND: sshCommand.join(' '),
-  }
-}
-
 export class HostGitManager {
   // Per-repo serialization: one queue per git-common-dir. Linked worktrees (git worktree
   // add) of the same repo share `.git/config` and refs, so they must share a queue to
@@ -92,6 +47,56 @@ export class HostGitManager {
   // cwd → queue-key cache. `git rev-parse --git-common-dir` shells out; caching avoids
   // running it on every enqueue. Repo layout doesn't move at runtime, so this is stable.
   private static queueKeyCache = new Map<string, string>()
+
+  /**
+   * @param knownHosts known_hosts file to pin host-key verification to for host-side
+   *   git transfers; when omitted, `process.env.REMOTE_SSH_KNOWN_HOSTS` is used so
+   *   standalone use (e.g. `allocateAndReserveBranchNumber`) keeps its env-driven
+   *   behavior.
+   */
+  constructor(private readonly knownHosts?: string) {}
+
+  // Always sets GIT_SSH_COMMAND so host-side git transfers (push/fetch to the remote
+  // machine) go through ssh with the same BatchMode, connection reuse (ControlMaster)
+  // and keepalive behavior as SshExecutor command execution. When a known_hosts file is
+  // configured — the constructor value, falling back to REMOTE_SSH_KNOWN_HOSTS in the
+  // environment — host verification for the transfer is additionally pinned to it: this
+  // lets the first noninteractive sync succeed without trust-on-first-use, and without
+  // changing SSH behavior for any other remote. Unset means inherited host-key behavior
+  // for the transfer itself.
+  //
+  // The value crosses two parsers. sh splits GIT_SSH_COMMAND into ssh's argv (outer
+  // single quotes, applied per argument below), then OpenSSH splits the
+  // UserKnownHostsFile VALUE on whitespace as a file list (inner double quotes keep a
+  // spaced path as one file). OpenSSH's config grammar has no escape for a literal
+  // double quote inside a quoted value, so such paths are rejected instead of being
+  // silently mis-pinned.
+  private networkEnv(): NodeJS.ProcessEnv {
+    const knownHosts = this.knownHosts ?? process.env.REMOTE_SSH_KNOWN_HOSTS?.trim()
+    if (knownHosts?.includes('"')) {
+      throw new Error('REMOTE_SSH_KNOWN_HOSTS must not contain a double quote (") character')
+    }
+    // Each ssh argument is single-quoted: sh re-splits GIT_SSH_COMMAND, and values like
+    // the ControlPath socket template must survive that split as single arguments.
+    const sshCommand = ['ssh', ...sshCommonArgs().map(shellQuote)]
+    if (knownHosts) {
+      sshCommand.push(
+        '-o',
+        shellQuote(`UserKnownHostsFile="${knownHosts}"`),
+        '-o',
+        'GlobalKnownHostsFile=/dev/null',
+        '-o',
+        'StrictHostKeyChecking=yes',
+      )
+    }
+    return {
+      ...process.env,
+      // GlobalKnownHostsFile=/dev/null: otherwise a matching entry in the system-wide
+      // /etc/ssh/ssh_known_hosts would also be accepted and verification would not be
+      // pinned to the configured file alone.
+      GIT_SSH_COMMAND: sshCommand.join(' '),
+    }
+  }
 
   /**
    * Resolve the serialization key for a worktree: the CANONICAL absolute path of its
@@ -293,7 +298,7 @@ export class HostGitManager {
       this.setRemote(remoteName, sshUrl, cwd)
       let attempts = 0
       while (attempts < 3) {
-        const pushRes = execGit(['push', remoteName, `HEAD:${branch}`], { cwd, env: networkEnv() })
+        const pushRes = execGit(['push', remoteName, `HEAD:${branch}`], { cwd, env: this.networkEnv() })
         if (pushRes.ok) {
           logger.info(`✓ Pushed local changes to ${remoteName}`)
           return
@@ -340,7 +345,7 @@ export class HostGitManager {
           if (localBranch) {
             // Fetch into FETCH_HEAD only (never into refs/heads) so we don't hit
             // "refusing to fetch into branch checked out" when this branch is checked out.
-            const fetchRes = execGit(['fetch', remoteName, branch], { cwd, env: networkEnv() })
+            const fetchRes = execGit(['fetch', remoteName, branch], { cwd, env: this.networkEnv() })
             if (!fetchRes.ok) throw new Error(fetchRes.stderr)
 
             const updateRefRes = execGit(['update-ref', `refs/heads/${localBranch}`, 'FETCH_HEAD'], { cwd })
@@ -356,7 +361,7 @@ export class HostGitManager {
 
             logger.info(`✓ Force pulled latest changes from sandbox into ${localBranch}`)
           } else {
-            const pullRes = execGit(['pull', remoteName, branch], { cwd, env: networkEnv() })
+            const pullRes = execGit(['pull', remoteName, branch], { cwd, env: this.networkEnv() })
             if (!pullRes.ok) throw new Error(pullRes.stderr)
             logger.info('✓ Pulled latest changes from sandbox')
           }
@@ -382,7 +387,7 @@ export class HostGitManager {
       this.setRemote(remoteName, sshUrl, cwd)
       let attempts = 0
       while (attempts < 3) {
-        const pushRes = execGit(['push', remoteName, `HEAD:${branch}`], { cwd, env: networkEnv() })
+        const pushRes = execGit(['push', remoteName, `HEAD:${branch}`], { cwd, env: this.networkEnv() })
         if (pushRes.ok) {
           logger.info('✓ Pushed changes to sandbox')
           return

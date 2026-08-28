@@ -34,6 +34,15 @@ export function sshCommonArgs(): string[] {
 export class SshExecutor {
   constructor(private readonly config: RemoteConfig) {}
 
+  /**
+   * The resolved known-hosts file for host-key pinning, if configured. Host-side git
+   * transfers (HostGitManager) reuse this so a REMOTE_SSH_KNOWN_HOSTS set only in .env
+   * pins transfers the same as command execution.
+   */
+  get knownHosts(): string | undefined {
+    return this.config.knownHosts
+  }
+
   target(): string {
     return this.config.user ? `${this.config.user}@${this.config.host}` : this.config.host
   }
