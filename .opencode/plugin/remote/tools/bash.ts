@@ -5,48 +5,43 @@
  */
 
 import { z } from 'zod'
-import { DaytonaNotFoundError } from '@daytona/sdk'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const bashTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
-  repoPath: string,
 ) => ({
-  description: 'Executes shell commands in a Daytona sandbox',
+  description: 'Executes shell commands on the remote machine',
   args: {
     command: z.string(),
     background: z.boolean().optional(),
   },
   async execute(args: { command: string; background?: boolean }, ctx: ToolContext) {
-    const sessionId = ctx.sessionID
-    const sandbox = await sessionManager.getSandbox(sessionId, projectId, worktree, pluginCtx)
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
 
     if (args.background) {
-      const execSessionId = `exec-session-${sessionId}`
-      try {
-        await sandbox.process.getSession(execSessionId)
-      } catch (err) {
-        if (!(err instanceof DaytonaNotFoundError)) {
-          throw err
-        }
-        await sandbox.process.createSession(execSessionId)
+      const logPath = `/tmp/opencode-remote-${ctx.sessionID}-${Date.now()}.log`
+      const result = await ssh.exec(`nohup sh -c ${shellQuote(args.command)} > ${shellQuote(logPath)} 2>&1 & echo $!`, {
+        cwd: session.workspacePath,
+      })
+      if (result.code !== 0) {
+        throw new Error(`Failed to start background command: ${result.stderr || result.stdout}`)
       }
-      await sandbox.process.executeSessionCommand(execSessionId, {
-        command: `cd ${repoPath}`,
-      })
-      const result = await sandbox.process.executeSessionCommand(execSessionId, {
-        command: args.command,
-        runAsync: true,
-      })
-      return `Command started in background (cmdId: ${result.cmdId})`
-    } else {
-      const result = await sandbox.process.executeCommand(args.command, repoPath)
-      return `Exit code: ${result.exitCode}\n${result.result}`
+      const pid = result.stdout.trim()
+      return `Command started in background (pid: ${pid}). Output: ${logPath}`
     }
+
+    const result = await ssh.exec(args.command, { cwd: session.workspacePath })
+    let output = `Exit code: ${result.code}\n${result.stdout}`
+    if (result.stderr) {
+      output += `\n${result.stderr}`
+    }
+    return output
   },
 })

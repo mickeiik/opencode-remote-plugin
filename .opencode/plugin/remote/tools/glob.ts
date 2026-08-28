@@ -7,25 +7,32 @@
 import { z } from 'zod'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const globTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Searches for files matching a pattern in Daytona sandbox',
+  description: 'Searches for files matching a pattern on the remote machine',
   args: {
     pattern: z.string(),
   },
   async execute(args: { pattern: string }, ctx: ToolContext) {
-    const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const workDir = await sandbox.getWorkDir()
-    if (!workDir) {
-      throw new Error('Work directory not available')
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
+    const result = await ssh.exec(`find . -type f -name ${shellQuote(args.pattern)}`, {
+      cwd: session.workspacePath,
+    })
+    if (result.code !== 0) {
+      throw new Error(`Failed to search for files matching ${args.pattern}: ${result.stderr || result.stdout}`)
     }
-    const result = await sandbox.fs.searchFiles(workDir, args.pattern)
-    return result.files.join('\n')
+    return result.stdout
+      .split('\n')
+      .filter((path) => path !== '')
+      .map((path) => (path.startsWith('./') ? path.slice(2) : path))
+      .join('\n')
   },
 })

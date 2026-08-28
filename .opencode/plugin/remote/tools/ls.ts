@@ -7,27 +7,30 @@
 import { z } from 'zod'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
-import type { FileInfo } from '@daytona/sdk'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const lsTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Lists files in a directory in Daytona sandbox',
+  description: 'Lists files in a directory on the remote machine',
   args: {
     dirPath: z.string().optional(),
   },
   async execute(args: { dirPath?: string }, ctx: ToolContext) {
-    const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const workDir = await sandbox.getWorkDir()
-    const path = args.dirPath || workDir
-    if (!path) {
-      throw new Error('Work directory not available')
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
+    const path = args.dirPath || session.workspacePath
+    const result = await ssh.exec(`ls -1A -- ${shellQuote(path)}`, { cwd: session.workspacePath })
+    if (result.code !== 0) {
+      throw new Error(`Failed to list ${path}: ${result.stderr || result.stdout}`)
     }
-    const files = (await sandbox.fs.listFiles(path)) as FileInfo[]
-    return files.map((f) => f.name).join('\n')
+    return result.stdout
+      .split('\n')
+      .filter((name) => name !== '')
+      .join('\n')
   },
 })

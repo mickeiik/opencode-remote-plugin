@@ -5,7 +5,7 @@
  */
 
 /**
- * Tool implementations for Daytona sandbox integration
+ * Tool implementations for the remote machine integration
  */
 
 import { bashTool } from './tools/bash'
@@ -16,21 +16,19 @@ import { multieditTool } from './tools/multiedit'
 import { lsTool } from './tools/ls'
 import { globTool } from './tools/glob'
 import { grepTool } from './tools/grep'
-import { getPreviewURLTool } from './tools/get-preview-url'
 import { gitSyncTool } from './tools/git-sync'
 
-import type { DaytonaSessionManager } from './core/session-manager'
+import type { RemoteSessionManager } from './core/session-manager'
 import type { PluginInput } from '@opencode-ai/plugin'
 
-export function createDaytonaTools(
-  sessionManager: DaytonaSessionManager,
+export function createRemoteTools(
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) {
-  const repoPath = sessionManager.repoPath
   return {
-    bash: bashTool(sessionManager, projectId, worktree, pluginCtx, repoPath),
+    bash: bashTool(sessionManager, projectId, worktree, pluginCtx),
     read: readTool(sessionManager, projectId, worktree, pluginCtx),
     write: writeTool(sessionManager, projectId, worktree, pluginCtx),
     edit: editTool(sessionManager, projectId, worktree, pluginCtx),
@@ -38,7 +36,6 @@ export function createDaytonaTools(
     ls: lsTool(sessionManager, projectId, worktree, pluginCtx),
     glob: globTool(sessionManager, projectId, worktree, pluginCtx),
     grep: grepTool(sessionManager, projectId, worktree, pluginCtx),
-    getPreviewURL: getPreviewURLTool(sessionManager, projectId, worktree, pluginCtx),
     gitSync: gitSyncTool(sessionManager, projectId, worktree, pluginCtx),
   }
 }

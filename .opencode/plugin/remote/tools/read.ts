@@ -7,22 +7,26 @@
 import { z } from 'zod'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const readTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Reads file from Daytona sandbox',
+  description: 'Reads file from the remote machine',
   args: {
     filePath: z.string(),
   },
   async execute(args: { filePath: string }, ctx: ToolContext) {
-    const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const buffer = await sandbox.fs.downloadFile(args.filePath)
-    const decoder = new TextDecoder()
-    return decoder.decode(buffer)
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
+    const result = await ssh.exec(`cat -- ${shellQuote(args.filePath)}`, { cwd: session.workspacePath })
+    if (result.code !== 0) {
+      throw new Error(`Failed to read ${args.filePath}: ${result.stderr || result.stdout}`)
+    }
+    return result.stdout
   },
 })

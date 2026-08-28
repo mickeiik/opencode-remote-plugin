@@ -7,15 +7,16 @@
 import { z } from 'zod'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const multieditTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Applies multiple edits to a file in Daytona sandbox atomically',
+  description: 'Applies multiple edits to a file on the remote machine atomically',
   args: {
     filePath: z.string(),
     edits: z.array(
@@ -26,10 +27,13 @@ export const multieditTool = (
     ),
   },
   async execute(args: { filePath: string; edits: Array<{ oldString: string; newString: string }> }, ctx: ToolContext) {
-    const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const buffer = await sandbox.fs.downloadFile(args.filePath)
-    const decoder = new TextDecoder()
-    let content = decoder.decode(buffer)
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
+    const read = await ssh.exec(`cat -- ${shellQuote(args.filePath)}`, { cwd: session.workspacePath })
+    if (read.code !== 0) {
+      throw new Error(`Failed to read ${args.filePath}: ${read.stderr || read.stdout}`)
+    }
+    let content = read.stdout
 
     for (const [i, edit] of args.edits.entries()) {
       if (edit.oldString === '') {
@@ -49,7 +53,13 @@ export const multieditTool = (
       content = content.replace(edit.oldString, edit.newString)
     }
 
-    await sandbox.fs.uploadFile(Buffer.from(content), args.filePath)
+    const write = await ssh.exec(`cat > ${shellQuote(args.filePath)}`, {
+      cwd: session.workspacePath,
+      input: content,
+    })
+    if (write.code !== 0) {
+      throw new Error(`Failed to write ${args.filePath}: ${write.stderr || write.stdout}`)
+    }
     return `Applied ${args.edits.length} edits to ${args.filePath}`
   },
 })

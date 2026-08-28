@@ -5,35 +5,39 @@
  */
 
 import { z } from 'zod'
-import type { Match } from '@daytona/sdk'
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { ToolContext } from '@opencode-ai/plugin/tool'
-import type { DaytonaSessionManager } from '../core/session-manager'
+import type { RemoteSessionManager } from '../core/session-manager'
+import { shellQuote } from '../core/ssh'
 
 export const grepTool = (
-  sessionManager: DaytonaSessionManager,
+  sessionManager: RemoteSessionManager,
   projectId: string,
   worktree: string,
   pluginCtx: PluginInput,
 ) => ({
-  description: 'Searches for text pattern in files in Daytona sandbox',
+  description: 'Searches for text pattern in files on the remote machine',
   args: {
     pattern: z.string(),
   },
   async execute(args: { pattern: string }, ctx: ToolContext) {
-    const sandbox = await sessionManager.getSandbox(ctx.sessionID, projectId, worktree, pluginCtx)
-    const workDir = await sandbox.getWorkDir()
-    if (!workDir) {
-      throw new Error('Work directory not available')
+    const session = await sessionManager.getRemoteSession(ctx.sessionID, projectId, worktree, pluginCtx)
+    const ssh = sessionManager.getSshExecutor(worktree)
+    const result = await ssh.exec(`grep -rnI -e ${shellQuote(args.pattern)} .`, { cwd: session.workspacePath })
+    if (result.code === 1) {
+      return 'No matches found'
     }
-    const matches = await sandbox.fs.findFiles(workDir, args.pattern)
+    if (result.code > 1) {
+      throw new Error(`Failed to search for ${args.pattern}: ${result.stderr || result.stdout}`)
+    }
+    const lines = result.stdout
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => (line.startsWith('./') ? line.slice(2) : line))
     const maxMatches = 100
-    const formatted = matches
-      .slice(0, maxMatches)
-      .map((m: Match) => `${m.file}:${m.line}: ${m.content}`)
-      .join('\n')
-    if (matches.length > maxMatches) {
-      return `${formatted}\n... (${matches.length - maxMatches} more matches truncated; refine your pattern)`
+    const formatted = lines.slice(0, maxMatches).join('\n')
+    if (lines.length > maxMatches) {
+      return `${formatted}\n... (${lines.length - maxMatches} more matches truncated; refine your pattern)`
     }
     return formatted
   },

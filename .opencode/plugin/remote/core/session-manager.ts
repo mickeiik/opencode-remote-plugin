@@ -62,7 +62,11 @@ export class RemoteSessionManager {
     return this.executorPair
   }
 
-  private getExecutor(worktree: string): SshExecutor {
+  /**
+   * The SSH executor for `worktree`, shared with tools and git managers so every caller
+   * reuses the single lazily-resolved config/executor pair (and its fail-fast toast).
+   */
+  getSshExecutor(worktree: string): SshExecutor {
     return this.getExecutorPair(worktree).ssh
   }
 
@@ -299,7 +303,7 @@ export class RemoteSessionManager {
     const workspacePath = handle?.workspacePath ?? stored?.session.workspacePath
     if (branchNumber !== undefined && workspacePath && stored?.worktree) {
       try {
-        const ssh = this.getExecutor(stored.worktree)
+        const ssh = this.getSshExecutor(stored.worktree)
         const bareRepoPath = handle?.bareRepoPath ?? `${dirname(workspacePath)}/.bare/${basename(workspacePath)}.git`
         const sessionGit = new SessionGitManager(ssh, workspacePath, bareRepoPath, stored.worktree, branchNumber)
         await SessionGitManager.enqueueSessionSync(sessionId, () => sessionGit.autoCommitAndPull())
