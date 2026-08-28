@@ -8,6 +8,7 @@ No Daytona account, API key, or SDK is involved anymore: if you can `ssh user@ho
 
 - Runs each OpenCode session on a remote machine you control (server, homelab box, CI runner…)
 - The agent's file operations, shell commands, and searches all execute on the remote machine — your system is never exposed
+- Shadows OpenCode's built-in `apply_patch` tool with a plugin implementation that applies patches on the machine over SSH, so patch-based edits also land there even with models (GPT-5 family) that force-enable the built-in
 - Background git sync keeps each session mirrored to a local `opencode/N` branch
 - Each session gets its own numbered working directory on the machine, so several sessions can share one machine concurrently
 - Uses your normal SSH setup: `~/.ssh/config`, keys, agents, jump hosts
