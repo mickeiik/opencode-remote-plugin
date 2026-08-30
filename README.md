@@ -1,4 +1,4 @@
-# OpenCode Remote Plugin
+# OpenCode Remote SSH Plugin
 
 This is a fork of [`@daytona/opencode`](https://github.com/daytona/integrations/tree/main/packages/opencode-plugin) that replaces Daytona sandboxes with any machine you can reach over SSH. All OpenCode sessions run on your remote machine — the agent works entirely there, while changes stay synchronized to local git branches.
 
@@ -38,7 +38,7 @@ Point your project's `opencode.json` at this checkout:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/absolute/path/to/opencode-remote-plugin/.opencode/plugin"]
+  "plugin": ["/absolute/path/to/opencode-remote-ssh-plugin/.opencode/plugin"]
 }
 ```
 
@@ -214,7 +214,7 @@ This is a standalone repo — no monorepo tooling, no workspace dependencies bey
 
 ```bash
 git clone <this-repo>
-cd opencode-remote-plugin
+cd opencode-remote-ssh-plugin
 npm install
 ```
 
@@ -232,7 +232,7 @@ cd ~/myproject
 Add a symlink from the project directory to the plugin source code:
 
 ```
-ln -s [ABSOLUTE_PATH_TO_REPO]/opencode-remote-plugin/.opencode .opencode
+ln -s [ABSOLUTE_PATH_TO_REPO]/opencode-remote-ssh-plugin/.opencode .opencode
 ```
 
 Initialize git to enable file syncing:
@@ -266,7 +266,7 @@ To test the built package, create a test project and add a plugin loader file (r
 mkdir -p ~/myproject && cd ~/myproject
 mkdir -p .opencode/plugins
 cat > .opencode/plugins/opencode-remote.js << 'EOF'
-module.exports = require('[ABSOLUTE_PATH_TO_REPO]/opencode-remote-plugin/.opencode/plugin')
+module.exports = require('[ABSOLUTE_PATH_TO_REPO]/opencode-remote-ssh-plugin/.opencode/plugin')
 EOF
 ```
 
@@ -286,7 +286,7 @@ npm run typecheck
 ## Project Structure
 
 ```
-opencode-remote-plugin/
+opencode-remote-ssh-plugin/
 ├── .opencode/plugin/             # Plugin source (TypeScript)
 │   ├── remote/                   # Main integration
 │   └── index.ts                  # Plugin entry point (compiled to .js in place)

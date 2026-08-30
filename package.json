@@ -1,5 +1,5 @@
 {
-  "name": "opencode-remote-plugin",
+  "name": "opencode-remote-ssh-plugin",
   "version": "0.2.0",
   "description": "OpenCode plugin that runs all sessions on a remote machine over SSH, with automatic git sync back to local branches",
   "main": "./.opencode/plugin/index.js",
@@ -9,13 +9,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mickeiik/opencode-remote-plugin.git"
+    "url": "git+https://github.com/mickeiik/opencode-remote-ssh-plugin.git"
   },
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/mickeiik/opencode-remote-plugin/issues"
+    "url": "https://github.com/mickeiik/opencode-remote-ssh-plugin/issues"
   },
-  "homepage": "https://github.com/mickeiik/opencode-remote-plugin#readme",
+  "homepage": "https://github.com/mickeiik/opencode-remote-ssh-plugin#readme",
   "keywords": [
     "opencode",
     "plugin",
