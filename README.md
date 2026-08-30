@@ -55,6 +55,7 @@ Configure the remote machine through environment variables:
 | `REMOTE_USER`             | no       | Login user (default: your local username, like plain `ssh`)        |
 | `REMOTE_PROJECT_PATH`     | yes      | Directory root on the machine where session workspaces are created |
 | `REMOTE_SSH_KNOWN_HOSTS`  | no       | Path to a `known_hosts` file used to pin the machine's host key    |
+| `REMOTE_FALLBACK`         | no       | Fallback to local behavior when the remote is unusable (default: on; see [Fallback to local](#fallback-to-local)) |
 
 Or create a `.env` file in your project root:
 
@@ -93,6 +94,22 @@ export REMOTE_SSH_KNOWN_HOSTS=~/.config/opencode-remote/known_hosts
 ```
 
 Verify the collected fingerprints out of band (`ssh-keygen -lf ~/.config/opencode-remote/known_hosts`) before trusting the file. When `REMOTE_SSH_KNOWN_HOSTS` is set, git transfers use that file as the only host-key database (`StrictHostKeyChecking=yes`, system-wide known hosts ignored); SSH behavior for every other remote is unaffected. When unset, behavior is unchanged. Paths containing spaces are supported; a literal `"` in the path is rejected.
+
+### Fallback to local
+
+At every launch the plugin decides, once, whether it can run sessions on the remote machine: it resolves the `REMOTE_*` configuration and probes the machine over SSH (`ssh <target> true`, bounded at 15 seconds). This adds one SSH handshake to startup — typically well under two seconds on a healthy link, at most ~15 seconds when the machine is unreachable.
+
+- **Configuration missing or incomplete** (e.g. `REMOTE_HOST` set but `REMOTE_PROJECT_PATH` not): the plugin disables itself for this launch with an info toast, and OpenCode runs with its normal local behavior.
+- **Configuration resolves but the machine is unreachable** (DNS failure, connection timeout, refused, failed authentication): the plugin disables itself with a warning toast naming the host. The reason is logged to `remote.log`.
+- **Both checks pass**: the plugin activates exactly as usual, and the probe's SSH connection is reused by later commands.
+
+The decision is made once per launch. Mid-session SSH failures are still reported as errors; restart OpenCode to re-probe the machine. While the plugin is disabled, no idle syncing and no session-delete cleanup run — stored session mappings are left untouched and are cleaned up the next time the plugin is active.
+
+Set `REMOTE_FALLBACK` (environment or `.env`) to opt out:
+
+- Unset/empty (the default), `1`, `true`, `on`, `yes`: fallback enabled as described above.
+- `0`, `false`, `off`, `no`: no startup checks — the plugin always registers, and a missing configuration or an unreachable machine surfaces as per-tool/per-event errors with error toasts, never as a silent switch to local behavior.
+- Any other value is a configuration error: an error toast at startup, the reason logged to `remote.log`, and OpenCode runs locally.
 
 ## Running OpenCode
 

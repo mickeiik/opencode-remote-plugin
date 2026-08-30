@@ -132,3 +132,22 @@ export class SshExecutor {
     })
   }
 }
+
+/**
+ * One-shot connectivity probe for plugin init: `ssh <target> true` through a throwaway
+ * executor. Side benefit: it establishes the ControlMaster socket (fixed ControlPath)
+ * that later commands reuse for ControlPersist's lifetime. Bounded at 15s because
+ * ConnectTimeout only covers TCP connect/banner and BatchMode keeps auth
+ * non-interactive. Throws on non-zero exit (with the exit code, target, and trimmed
+ * stderr); spawn errors and timeouts reject from exec() directly.
+ */
+export async function probeRemote(config: RemoteConfig): Promise<void> {
+  const executor = new SshExecutor(config)
+  const result = await executor.exec('true', { timeoutMs: 15_000 })
+  if (result.code !== 0) {
+    const detail = (result.stderr || result.stdout).trim()
+    throw new Error(
+      `SSH probe failed for ${executor.target()} (exit ${result.code})${detail ? `: ${detail}` : ''}`,
+    )
+  }
+}

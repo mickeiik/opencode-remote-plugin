@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. This project forked from [`@daytona/opencode`](https://github.com/daytona/integrations/tree/main/packages/opencode-plugin); upstream history up to version 0.192.0 is visible [there](https://github.com/daytona/integrations/blob/main/packages/opencode-plugin/CHANGELOG.md).
 
+## [0.2.0] - 2026-08-30
+
+### Added
+
+- Automatic fallback to local behavior: at plugin init the plugin now resolves the `REMOTE_*` configuration and probes the machine over SSH (`ssh <target> true` through a throwaway `SshExecutor`, bounded at 15s — `ConnectTimeout` only covers TCP connect/banner, `BatchMode` keeps auth non-interactive; the probe also warms the ControlMaster socket later commands reuse). Missing or incomplete configuration disables the plugin for the launch with an info toast; a configuration that resolves but cannot be reached disables it with a warning toast naming the host. The reason is logged to `remote.log` in both cases, and returning an empty hooks object reverts OpenCode to its default local behavior (all `Hooks` fields are optional). The decision is made once per launch — restart OpenCode to re-probe; mid-session SSH failures remain errors, and while the plugin is disabled no idle syncing or session-delete cleanup runs (stored session mappings persist and are cleaned up the next time the plugin is active).
+- `REMOTE_FALLBACK` environment variable (environment or `.env`, resolved independently of `REMOTE_HOST` so it stays readable exactly when the host is missing): `0`/`false`/`off`/`no` skips the startup checks entirely and registers the plugin exactly as before this feature — missing configuration or an unreachable machine surface lazily as per-tool/per-event errors with error toasts, never a silent switch to local. Unset/empty (the default) and `1`/`true`/`on`/`yes` keep fallback enabled; any other value is a configuration error shown as an error toast at startup (reason in `remote.log`), after which OpenCode runs locally.
+
 ## [0.1.0] - 2026-08-26
 
 Initial fork release, based on `@daytona/opencode` 0.192.0.

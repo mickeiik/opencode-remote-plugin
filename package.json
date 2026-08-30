@@ -1,6 +1,6 @@
 {
   "name": "opencode-remote-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin that runs all sessions on a remote machine over SSH, with automatic git sync back to local branches",
   "main": "./.opencode/plugin/index.js",
   "types": "./.opencode/plugin/index.d.ts",

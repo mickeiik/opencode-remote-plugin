@@ -62,6 +62,29 @@ function parsePort(value: string): number {
   return port
 }
 
+const FALLBACK_DISABLE_TOKENS = new Set(['0', 'false', 'off', 'no'])
+const FALLBACK_ENABLE_TOKENS = new Set(['1', 'true', 'on', 'yes'])
+
+/**
+ * REMOTE_FALLBACK state for `worktree`, kept separate from RemoteConfig because the
+ * flag must be readable exactly when REMOTE_HOST is missing. Unset/empty → fallback
+ * enabled (the default); explicit enable/disable tokens (case-insensitive) → their
+ * value; anything else throws so an invalid value surfaces as a visible config error
+ * instead of a silent guess (strict, like REMOTE_PORT).
+ */
+export function isFallbackDisabled(worktree: string): boolean {
+  const env: NodeJS.ProcessEnv = { ...loadDotEnv(worktree), ...process.env }
+  const value = env.REMOTE_FALLBACK?.trim() ?? ''
+  if (!value) return false
+  const token = value.toLowerCase()
+  if (FALLBACK_DISABLE_TOKENS.has(token)) return true
+  if (FALLBACK_ENABLE_TOKENS.has(token)) return false
+  throw new Error(
+    `REMOTE_FALLBACK must be unset/empty (fallback on), one of ${[...FALLBACK_ENABLE_TOKENS].join('/')} ` +
+      `(fallback on), or one of ${[...FALLBACK_DISABLE_TOKENS].join('/')} (fallback off); got "${value}"`,
+  )
+}
+
 export function resolveRemoteConfig(worktree: string): RemoteConfig {
   const cached = configCache.get(worktree)
   if (cached) return cached
